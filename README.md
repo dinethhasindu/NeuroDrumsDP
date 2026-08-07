@@ -1,2 +1,2 @@
 # NeuroDrums-DP
-Drum Replace model
+AI-powered Drum Detection and Replacement Application
