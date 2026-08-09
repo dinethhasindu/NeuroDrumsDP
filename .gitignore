@@ -1,0 +1,13 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# App Cache and Outputs
+cache/
+*.wav
+*.mp3
