@@ -1,33 +1,44 @@
+import threading, time
+import numpy as np
 import soundfile as sf
 import sounddevice as sd
-import numpy as np
 
 class AudioPlayer:
     def __init__(self):
-        self.y_raw = None
+        self.audio = None
         self.sr = None
+        self.started_at = 0.0
+        self.offset = 0.0
+        self.playing = False
 
-    def load_file(self, file_path):
+    def load(self, y, sr):
+        self.audio = np.asarray(y, dtype=np.float32)
+        self.sr = sr
+        self.stop()
+
+    def play(self, start=0.0):
+        if self.audio is None: return
+        self.stop()
+        start = float(np.clip(start, 0, len(self.audio)/self.sr))
+        self.offset = start
+        self.started_at = time.perf_counter()
+        self.playing = True
+        threading.Thread(target=self._play_thread, args=(start,), daemon=True).start()
+
+    def _play_thread(self, start):
+        idx = int(start*self.sr)
         try:
-            # Read audio file
-            self.y_raw, self.sr = sf.read(file_path)
-            
-            # Convert to mono just for the waveform visualizer
-            if len(self.y_raw.shape) > 1:
-                y_mono = np.mean(self.y_raw, axis=1)
-            else:
-                y_mono = self.y_raw
-                
-            return y_mono, self.sr
-            
-        except Exception as e:
-            print(f"[Audio Engine] Error loading file: {e}")
-            return None, None
+            sd.play(self.audio[idx:], self.sr, blocking=True)
+        finally:
+            self.playing = False
 
-    def play(self):
-        if self.y_raw is not None:
-            # Non-blocking playback
-            sd.play(self.y_raw, self.sr)
+    def position(self):
+        if not self.playing:
+            return self.offset
+        return self.offset + (time.perf_counter()-self.started_at)
 
     def stop(self):
         sd.stop()
+        if self.playing:
+            self.offset = self.position()
+        self.playing = False

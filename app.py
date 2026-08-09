@@ -1,12 +1,23 @@
+"""
+NeuroDrums AI - Application Entry Point.
+Starts the PySide6 application.
+"""
 import sys
-from tkinterdnd2 import TkinterDnD
-from ui.main_window import NeuroDrumsUI
+import os
+from PySide6.QtWidgets import QApplication
+from ui.main_window import MainWindow
 
 def main():
-    # TkinterDnD.Tk() enables drag-and-drop functionality
-    root = TkinterDnD.Tk()
-    app = NeuroDrumsUI(root)
-    root.mainloop()
+    # Make sure we're in the right directory
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    
+    app = QApplication(sys.argv)
+    app.setApplicationName("NeuroDrums AI")
+    
+    window = MainWindow()
+    window.show()
+    
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()

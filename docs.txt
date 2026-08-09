@@ -1,0 +1,8 @@
+NeuroDrumsDP v2 architecture:
+- Demucs: optional full-song -> drum extraction.
+- Hybrid detector: onset + spectral analysis -> 8 editable drum event lanes.
+- Editor: timeline, 8 lanes, event selection, manual event insertion/removal, mute, replacement samples.
+- Renderer: removes local original hit and overlays transformed replacement sample.
+- Audio controls: volume, pitch, punch, decay, speed.
+- Export: WAV.
+The detector is not a trained 8-class neural network yet. It is a deterministic hybrid detector designed as a stable base for plugging in a stronger ADT/ONNX model later.

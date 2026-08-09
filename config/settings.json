@@ -1,0 +1,21 @@
+{
+  "audio_device": "default",
+  "sample_rate": 44100,
+  "buffer_size": 1024,
+  "gpu_device": "auto",
+  "ai_model": "htdemucs_ft",
+  "detection_sensitivity": "medium",
+  "confidence_threshold": 0.40,
+  "auto_snap": true,
+  "snap_division": "1/16",
+  "bpm": 120,
+  "theme": "dark",
+  "cache_location": "cache",
+  "model_location": "models",
+  "cpu_threads": 4,
+  "gpu_memory_limit_mb": 4096,
+  "batch_size": 8,
+  "min_event_separation_ms": 30,
+  "use_gpu": true,
+  "demucs_shifts": 2
+}

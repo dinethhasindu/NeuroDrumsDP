@@ -1,0 +1,1 @@
+# NeuroDrums AI - Detection package
