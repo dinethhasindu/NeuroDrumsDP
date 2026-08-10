@@ -1,15 +1,44 @@
+# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.venv/
+*.pyo
+
+# Virtual environments
 venv/
+.venv/
 env/
+
+# IDE
 .vscode/
 .idea/
-cache/*
-exports/*
-models/*.pkl
+
+# Runtime/cache
+cache/
+.cache/
+*.cache
+
+# Generated audio
+output/
+exports/
+rendered/
+*.wav
+*.mp3
+*.flac
+
+# Logs
 *.log
-*.tmp
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Local config/secrets
+.env
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Local ML model weights (too large for regular GitHub repositories)
+models/*.onnx

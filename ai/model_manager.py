@@ -136,23 +136,9 @@ def download_model(
 
 
 def ensure_rf_classifier_exists() -> bool:
-    """
-    If the RF classifier pkl does not exist, build it from
-    synthetic training data. Called at app startup.
-
-    Returns True if classifier is available after this call.
-    """
+    """Return True only if a real trained RF classifier file exists."""
     rf_path = os.path.join(get_models_dir(), "drum_rf_classifier.pkl")
-    if os.path.exists(rf_path):
-        return True
-    try:
-        from ai.classifier import build_and_save_default_classifier
-        print("[ModelManager] Building default RF classifier from synthetic data...")
-        build_and_save_default_classifier()
-        return os.path.exists(rf_path)
-    except Exception as e:
-        print(f"[ModelManager] Could not build RF classifier: {e}")
-        return False
+    return os.path.exists(rf_path)
 
 
 def onnx_session(model_key: str = "drumsep_onnx"):

@@ -14,6 +14,7 @@ def save_project(p,path):
 def load_project(path):
     with open(path,'r',encoding='utf-8') as f: d=json.load(f)
     p=new_project(); p.version=d.get('version','1.1'); p.source_path=d.get('source_path',''); p.drum_stem_path=d.get('drum_stem_path',''); p.bpm=float(d.get('bpm',120)); p.zoom=float(d.get('zoom',120)); p.playhead=float(d.get('playhead',0))
+    p.snap_enabled=bool(d.get('snap_enabled',False)); p.grid_fraction=float(d.get('grid_fraction',0.25)); p.triplet_grid=bool(d.get('triplet_grid',False)); p.markers=list(d.get('markers',[]))
     p.events=[DrumEvent.from_dict(x) for x in d.get('events',[])]
     for n,x in d.get('lanes',{}).items():
         if n in p.lane_states:

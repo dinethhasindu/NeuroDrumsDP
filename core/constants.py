@@ -22,3 +22,14 @@ SENSITIVITY_PRESETS = {
     'medium': {'delta': 0.20, 'wait': 3},
     'high': {'delta': 0.10, 'wait': 1},
 }
+
+MODEL_INFO = {
+    'drumsep_onnx': {
+        'filename': 'drumsep.onnx',
+        'description': 'ONNX drum source separation (future)',
+        'license': 'MIT',
+        'purpose': 'Stage 1: Separate drums from full mix',
+        'size_mb': 50,
+        'url': None,
+    },
+}

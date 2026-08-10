@@ -35,13 +35,20 @@ class DrumEvent:
     fade_out_ms: float = 10.0
     pan: float = 0.0
     timing_offset_ms: float = 0.0
+    source_offset_ms: float = 0.0
     replacement_sample: Optional[str] = None
+    replace_mode: str = 'replace'
+    original_attenuation: float = 1.0
+    match_velocity: bool = True
+    velocity_curve: str = 'linear'
     spectral_centroid: float = 0.0
     low_energy: float = 0.0
     mid_energy: float = 0.0
     high_energy: float = 0.0
     zcr: float = 0.0
     onset_strength: float = 0.0
+    source: str = 'analysis'
+    features: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -71,6 +78,10 @@ class ProjectState:
     lane_states: Dict[str, LaneState] = field(default_factory=dict)
     zoom: float = 120.0
     playhead: float = 0.0
+    snap_enabled: bool = False
+    grid_fraction: float = 0.25
+    triplet_grid: bool = False
+    markers: List[float] = field(default_factory=list)
     audio_info: Optional[AudioInfo] = None
 
     def to_dict(self):
@@ -80,5 +91,7 @@ class ProjectState:
             'events': [e.to_dict() for e in self.events],
             'lanes': {k: asdict(v) for k, v in self.lane_states.items()},
             'zoom': self.zoom, 'playhead': self.playhead,
+            'snap_enabled': self.snap_enabled, 'grid_fraction': self.grid_fraction,
+            'triplet_grid': self.triplet_grid, 'markers': list(self.markers),
             'audio_info': asdict(self.audio_info) if self.audio_info else None,
         }
