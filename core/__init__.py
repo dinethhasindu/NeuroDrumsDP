@@ -1,1 +1,0 @@
-# NeuroDrums AI - Core package

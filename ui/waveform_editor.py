@@ -1,267 +1,106 @@
-"""
-NeuroDrums AI - Waveform Editor.
-Custom QWidget that draws the multi-track drum lanes using QPainter.
-Handles scrolling, zooming, selection, and drag-and-drop.
-"""
 from __future__ import annotations
+import numpy as np
 from PySide6.QtWidgets import QWidget
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QMouseEvent, QWheelEvent, QPainterPath
-from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtGui import QPainter,QPen,QBrush,QColor,QPainterPath,QMouseEvent,QWheelEvent
+from PySide6.QtCore import Qt,Signal,QRectF
+from core.constants import LANE_NAMES,LANE_COLORS,LANE_HEIGHT,MIN_ZOOM,MAX_ZOOM
 
-from core.models import DrumEvent
-from core.constants import LANE_NAMES, LANE_COLORS, LANE_HEIGHT
-from audio.waveform_cache import WaveformCache
+class OverviewWaveform(QWidget):
+    seek_requested=Signal(float)
+    def __init__(self,parent=None):
+        super().__init__(parent); self.cache=None; self.duration=0; self.playhead=0; self.setMinimumHeight(86); self.setStyleSheet('background:#0e1217;')
+    def set_data(self,cache,duration): self.cache=cache; self.duration=duration; self.update()
+    def set_playhead(self,p): self.playhead=p; self.update()
+    def mousePressEvent(self,e):
+        if self.duration and e.button()==Qt.LeftButton: self.seek_requested.emit(max(0,min(self.duration,e.position().x()/max(1,self.width())*self.duration)))
+    def paintEvent(self,e):
+        p=QPainter(self); p.setRenderHint(QPainter.Antialiasing); p.fillRect(self.rect(),QColor('#0e1217'))
+        p.setPen(QPen(QColor('#252c35'))); p.drawRect(self.rect().adjusted(0,0,-1,-1))
+        if not self.cache or self.duration<=0: return
+        times,mn,mx=self.cache.get_peaks(0,self.duration,max(2,self.width()),self.width()/self.duration)
+        if len(times):
+            path=QPainterPath(); center=self.height()/2; scale=self.height()*0.42
+            for i,(t,a,b) in enumerate(zip(times,mn,mx)):
+                x=t/self.duration*self.width(); y1=center-b*scale; y2=center-a*scale
+                if i==0:path.moveTo(x,y1)
+                else:path.lineTo(x,y1)
+            for t,a,b in zip(times[::-1],mn[::-1],mx[::-1]): path.lineTo(t/self.duration*self.width(),center-a*scale)
+            path.closeSubpath(); p.setBrush(QBrush(QColor('#2f81f7'))); p.setPen(Qt.NoPen); p.drawPath(path)
+            p.setPen(QPen(QColor('#7fb3ff'),1)); p.drawLine(0,int(center),self.width(),int(center))
+        x=self.playhead/self.duration*self.width(); p.setPen(QPen(QColor('#ff4d6d'),2)); p.drawLine(int(x),0,int(x),self.height()); p.end()
 
 class WaveformEditor(QWidget):
-    """
-    Renders the waveform peaks and drum events.
-    """
-    
-    event_selected = Signal(str) # Emits event ID
-    event_moved = Signal(str, float) # Emits (event_id, new_start_time)
-    seek_requested = Signal(float)
-    sample_dropped = Signal(str, str)  # Emits (lane_name, absolute_sample_path)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setAcceptDrops(True)
-        
-        self.events = []
-        self.cache = None
-        self.duration = 0.0
-        
-        self.zoom = 100.0 # pixels per second
-        # The widget lives inside a QScrollArea, which already translates its
-        # coordinate system.  Keep this for compatibility with callers, but
-        # do not apply it a second time while painting or hit-testing.
-        self.scroll_x = 0
-        
-        self.selected_event_id = None
-        self.hovered_event_id = None
-        
-        self._is_dragging = False
-        self._drag_start_x = 0
-        self._drag_start_time = 0.0
-        
-        self.playhead_pos = 0.0
-        
-    def set_data(self, events, cache, duration):
-        self.events = events
-        self.cache = cache
-        self.duration = duration
+    event_selected=Signal(str); event_moved=Signal(str,float); seek_requested=Signal(float); sample_dropped=Signal(str,str); zoom_changed=Signal(float)
+    def __init__(self,parent=None):
+        super().__init__(parent); self.setAcceptDrops(True); self.setMouseTracking(True); self.setFocusPolicy(Qt.StrongFocus)
+        self.events=[]; self.cache=None; self.duration=0; self.zoom=120; self.playhead=0; self.selected=None; self.hover=None; self.drag=None
+    def set_data(self,events,cache,duration,zoom=None):
+        self.events=events or []; self.cache=cache; self.duration=float(duration); self.zoom=float(zoom or self.zoom); self._resize(); self.update()
+    def _resize(self): self.setMinimumWidth(max(900,int(self.duration*self.zoom)+20)); self.setMinimumHeight(len(LANE_NAMES)*LANE_HEIGHT)
+    def set_zoom(self,z): self.zoom=max(MIN_ZOOM,min(MAX_ZOOM,float(z))); self._resize(); self.zoom_changed.emit(self.zoom); self.update()
+    def set_playhead(self,p): self.playhead=max(0,min(self.duration,float(p))); self.update()
+    def _lane_at(self,y):
+        idx=int(y//LANE_HEIGHT); return LANE_NAMES[idx] if 0<=idx<len(LANE_NAMES) else None
+    def _event_at(self,x,y):
+        lane=self._lane_at(y); t=x/self.zoom
+        if not lane:return None
+        hits=[e for e in self.events if not e.removed and e.type==lane and e.start-0.015<=t<=max(e.end,e.start+0.045)]
+        return min(hits,key=lambda e:abs(e.start-t)) if hits else None
+    def mousePressEvent(self,e:QMouseEvent):
+        if e.button()!=Qt.LeftButton:return
+        x,y=float(e.position().x()),float(e.position().y()); ev=self._event_at(x,y)
+        if ev:
+            self.selected=ev.id; self.event_selected.emit(ev.id); self.drag=(x,ev.start); self.update()
+        else:
+            self.selected=None; self.event_selected.emit(''); self.seek_requested.emit(max(0,min(self.duration,x/self.zoom)))
+    def mouseMoveEvent(self,e):
+        x,y=float(e.position().x()),float(e.position().y()); ev=self._event_at(x,y); self.hover=ev.id if ev else None
+        if self.drag and self.selected:
+            dx=x-self.drag[0]; new=max(0,min(self.duration,self.drag[1]+dx/self.zoom))
+            for obj in self.events:
+                if obj.id==self.selected: obj.start=new; obj.end=new+obj.duration; break
         self.update()
-        
-    def set_playhead(self, pos: float):
-        self.playhead_pos = pos
-        # Auto-scroll if playing and out of view
-        # Not implementing full smooth auto-scroll here to keep it simple, but we trigger a repaint.
-        self.update()
-
-    def get_event_at_pos(self, x: int, y: int) -> DrumEvent | None:
-        if not self.events:
-            return None
-            
-        lane_idx = y // LANE_HEIGHT
-        if lane_idx < 0 or lane_idx >= len(LANE_NAMES):
-            return None
-            
-        lane_name = LANE_NAMES[lane_idx]
-        t = x / self.zoom
-        
-        # Find event in this lane near time t
-        # Events have a duration, or we click within a small window
-        for e in self.events:
-            if e.type == lane_name and not e.removed:
-                if e.start <= t <= e.end:
-                    return e
-                    
-        return None
-
-    def mousePressEvent(self, e: QMouseEvent):
-        if e.button() == Qt.LeftButton:
-            event = self.get_event_at_pos(e.position().x(), e.position().y())
-            if event:
-                self.selected_event_id = event.id
-                self.event_selected.emit(event.id)
-                self._is_dragging = True
-                self._drag_start_x = e.position().x()
-                self._drag_start_time = event.start
-            else:
-                self.selected_event_id = None
-                self.event_selected.emit("")
-                seek_time = max(0.0, min(e.position().x() / self.zoom, self.duration))
-                self.seek_requested.emit(seek_time)
-            self.update()
-
-    def mouseMoveEvent(self, e: QMouseEvent):
-        event = self.get_event_at_pos(e.position().x(), e.position().y())
-        hover_id = event.id if event else None
-        
-        if hover_id != self.hovered_event_id:
-            self.hovered_event_id = hover_id
-            self.update()
-            
-        if self._is_dragging and self.selected_event_id:
-            dx = e.position().x() - self._drag_start_x
-            dt = dx / self.zoom
-            new_time = max(0.0, self._drag_start_time + dt)
-            
-            # Find the event and update its start (preview)
-            for ev in self.events:
-                if ev.id == self.selected_event_id:
-                    ev.start = new_time
-                    ev.end = new_time + ev.duration
-                    break
-            self.update()
-
-    def mouseReleaseEvent(self, e: QMouseEvent):
-        if e.button() == Qt.LeftButton and self._is_dragging:
-            self._is_dragging = False
-            if self.selected_event_id:
-                for ev in self.events:
-                    if ev.id == self.selected_event_id:
-                        self.event_moved.emit(ev.id, ev.start)
-                        break
-
-    def wheelEvent(self, e: QWheelEvent):
-        # Vertical scroll
-        if e.angleDelta().y() != 0:
-            pass # The parent QScrollArea handles vertical scroll
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        lane_idx = int(event.position().y()) // LANE_HEIGHT
-        if 0 <= lane_idx < len(LANE_NAMES):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        lane_idx = int(event.position().y()) // LANE_HEIGHT
-        urls = event.mimeData().urls()
-        if not (0 <= lane_idx < len(LANE_NAMES)) or not urls:
-            event.ignore()
-            return
-
-        path = urls[0].toLocalFile()
-        if path.lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".m4a")):
-            self.sample_dropped.emit(LANE_NAMES[lane_idx], path)
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        w = self.width()
-        h = self.height()
-        
-        # Background
-        painter.fillRect(self.rect(), QColor("#121212"))
-        
-        if not self.cache or self.duration == 0:
-            painter.end()
-            return
-            
-        t_start = 0.0
-        t_end = w / self.zoom
-        
-        # Draw lane backgrounds and grid
-        for i, lane in enumerate(LANE_NAMES):
-            y_offset = i * LANE_HEIGHT
-            
-            # Alt bg
-            if i % 2 == 1:
-                painter.fillRect(0, y_offset, w, LANE_HEIGHT, QColor("#1a1a1a"))
-                
-            # Separator
-            painter.setPen(QPen(QColor("#333333")))
-            painter.drawLine(0, y_offset + LANE_HEIGHT, w, y_offset + LANE_HEIGHT)
-            
-        # Draw waveform peaks for the visible region
-        times, min_p, max_p = self.cache.get_peaks(t_start, t_end, w, self.zoom)
-        if len(times) > 0:
-            # We draw the same waveform faint in all lanes
-            path = QPainterPath()
-            
-            # Convert times to x coordinates
-            x_coords = times * self.zoom
-            
-            for i, lane in enumerate(LANE_NAMES):
-                y_center = i * LANE_HEIGHT + (LANE_HEIGHT / 2)
-                
-                # Faint waveform
-                painter.setPen(QPen(QColor("#444444")))
-                for j in range(len(x_coords)):
-                    x = x_coords[j]
-                    y1 = y_center + (min_p[j] * (LANE_HEIGHT / 2.2))
-                    y2 = y_center + (max_p[j] * (LANE_HEIGHT / 2.2))
-                    painter.drawLine(x, y1, x, y2)
-
-        # Draw Events
-        for e in self.events:
-            if e.removed or e.start > t_end or e.end < t_start:
-                continue
-                
-            try:
-                lane_idx = LANE_NAMES.index(e.type)
-            except ValueError:
-                continue
-                
-            y_offset = lane_idx * LANE_HEIGHT
-            
-            x1 = e.start * self.zoom
-            x2 = e.end * self.zoom
-            
-            rect = QRectF(x1, y_offset + 5, max(4, x2 - x1), LANE_HEIGHT - 10)
-            
-            color = QColor(LANE_COLORS.get(e.type, "#ffffff"))
-            if e.muted:
-                color = QColor("#555555")
-            elif e.uncertain:
-                color.setAlpha(150)
-                
-            is_selected = (e.id == self.selected_event_id)
-            is_hovered = (e.id == self.hovered_event_id)
-            
-            if is_selected:
-                painter.setBrush(QBrush(color.lighter(130)))
-                painter.setPen(QPen(QColor("#ffffff"), 2))
-            elif is_hovered:
-                painter.setBrush(QBrush(color.lighter(110)))
-                painter.setPen(QPen(color, 1))
-            else:
-                painter.setBrush(QBrush(color))
-                painter.setPen(Qt.NoPen)
-                
-            painter.drawRoundedRect(rect, 3, 3)
-            
-            # Velocity indicator (line)
-            painter.setPen(QPen(QColor("#000000"), 1))
-            v_y = y_offset + 5 + (LANE_HEIGHT - 10) * (1.0 - e.velocity)
-            painter.drawLine(x1, v_y, x1 + rect.width(), v_y)
-
-        # Draw Playhead
-        ph_x = self.playhead_pos * self.zoom
-        if 0 <= ph_x <= w:
-            painter.setPen(QPen(QColor("#ffffff"), 1))
-            painter.drawLine(ph_x, 0, ph_x, h)
-            
-            # Playhead triangle
-            path = QPainterPath()
-            path.moveTo(ph_x - 5, 0)
-            path.lineTo(ph_x + 5, 0)
-            path.lineTo(ph_x, 8)
-            path.closeSubpath()
-            painter.setBrush(QBrush(QColor("#ffffff")))
-            painter.drawPath(path)
-
-        painter.end()
+    def mouseReleaseEvent(self,e):
+        if e.button()==Qt.LeftButton and self.drag and self.selected:
+            for obj in self.events:
+                if obj.id==self.selected:self.event_moved.emit(obj.id,obj.start);break
+            self.drag=None
+    def wheelEvent(self,e:QWheelEvent):
+        if e.modifiers() & Qt.ControlModifier:
+            old=self.zoom; factor=1.18 if e.angleDelta().y()>0 else 1/1.18; self.set_zoom(old*factor); e.accept(); return
+        super().wheelEvent(e)
+    def dragEnterEvent(self,e): e.acceptProposedAction() if e.mimeData().hasUrls() else e.ignore()
+    def dropEvent(self,e):
+        urls=e.mimeData().urls(); lane=self._lane_at(float(e.position().y()))
+        if urls and lane:
+            p=urls[0].toLocalFile();
+            if p.lower().endswith(('.wav','.mp3','.flac','.ogg','.m4a')): self.sample_dropped.emit(lane,p); e.acceptProposedAction(); return
+        e.ignore()
+    def paintEvent(self,e):
+        p=QPainter(self); p.setRenderHint(QPainter.Antialiasing); p.fillRect(self.rect(),QColor('#0d1116'))
+        if not self.cache or self.duration<=0:return
+        t0=0; t1=min(self.duration,self.width()/self.zoom); times,mn,mx=self.cache.get_peaks(t0,t1,max(100,self.width()),self.zoom)
+        for i,lane in enumerate(LANE_NAMES):
+            y=i*LANE_HEIGHT; bg=QColor('#11161c' if i%2==0 else '#151a20'); p.fillRect(0,y,self.width(),LANE_HEIGHT,bg)
+            p.setPen(QPen(QColor('#252c34'),1)); p.drawLine(0,y+LANE_HEIGHT-1,self.width(),y+LANE_HEIGHT-1)
+            # center line
+            p.setPen(QPen(QColor(LANE_COLORS[lane]),1,Qt.DotLine)); p.setOpacity(.25); p.drawLine(0,y+LANE_HEIGHT/2,self.width(),y+LANE_HEIGHT/2); p.setOpacity(1)
+        if len(times):
+            for i,lane in enumerate(LANE_NAMES):
+                center=i*LANE_HEIGHT+LANE_HEIGHT/2; scale=LANE_HEIGHT*0.39; p.setPen(QPen(QColor(LANE_COLORS[lane]),1)); p.setOpacity(.22)
+                # stride to keep paint cost bounded
+                stride=max(1,len(times)//max(1,self.width()//2))
+                for j in range(0,len(times),stride):
+                    x=times[j]*self.zoom; p.drawLine(int(x),int(center-mx[j]*scale),int(x),int(center-mn[j]*scale))
+                p.setOpacity(1)
+        for ev in self.events:
+            if ev.removed or ev.start>t1 or ev.end<t0 or ev.type not in LANE_NAMES:continue
+            li=LANE_NAMES.index(ev.type); x1=ev.start*self.zoom; x2=max(x1+6,ev.end*self.zoom); y=li*LANE_HEIGHT+10
+            c=QColor(LANE_COLORS[ev.type]); c.setAlpha(180 if ev.uncertain else 230)
+            if ev.id==self.selected: c=c.lighter(135)
+            p.setBrush(QBrush(c)); p.setPen(QPen(QColor('#ffffff') if ev.id==self.selected else c.lighter(115),2 if ev.id==self.selected else 1)); p.drawRoundedRect(QRectF(x1,y,x2-x1,LANE_HEIGHT-20),5,5)
+            p.setPen(QColor('#ffffff')); p.drawText(QRectF(x1+5,y+18,max(20,x2-x1-8),18),Qt.AlignLeft,ev.type)
+            # confidence bar
+            p.setPen(Qt.NoPen); p.setBrush(QColor(255,255,255,80)); p.drawRect(QRectF(x1,y+LANE_HEIGHT-29,max(3,(x2-x1)*ev.confidence),3))
+        x=self.playhead*self.zoom; p.setPen(QPen(QColor('#ff335f'),2)); p.drawLine(int(x),0,int(x),self.height()); p.setBrush(QColor('#ff335f')); p.drawEllipse(int(x)-4,2,8,8)
+        p.end()

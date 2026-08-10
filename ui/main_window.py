@@ -1,348 +1,145 @@
-"""
-NeuroDrums AI - Main Window.
-PySide6 QMainWindow connecting all panels and audio engine.
-"""
 from __future__ import annotations
-import os
-import sys
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QScrollArea, QSplitter, QMenuBar, QMenu, QFileDialog, QMessageBox,
-    QPushButton, QLabel, QCheckBox
-)
-from PySide6.QtCore import Qt, QTimer, QObject, Signal
-
+import os, threading
+from PySide6.QtWidgets import (QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QSplitter,QPushButton,QLabel,QCheckBox,QComboBox,QProgressBar,QFileDialog,QMessageBox,QScrollArea,QFrame)
+from PySide6.QtCore import Qt,QTimer,QObject,Signal
 from ui.styles import DARK_THEME_QSS
 from ui.sample_browser import SampleBrowser
 from ui.event_inspector import EventInspector
 from ui.lane_widget import LaneWidget
 from ui.timeline_ruler import TimelineRuler
-from ui.waveform_editor import WaveformEditor
-
-from core.models import ProjectState, LaneState
-from core.constants import LANE_NAMES, LANE_COLORS, LANE_HEIGHT, APP_NAME, APP_VERSION
+from ui.waveform_editor import WaveformEditor,OverviewWaveform
+from core.constants import *
+from core.models import ProjectState,LaneState
+from audio.loader import load_audio
+from audio.waveform_cache import WaveformCache
 from audio.engine import AudioEngine
 from audio.renderer import AudioRenderer
 from audio.exporter import export_mix
-from audio.loader import load_audio
-from audio.waveform_cache import WaveformCache
 from ai.pipeline import AnalysisPipeline
+from project.manager import new_project,save_project,load_project
 
-class PipelineBridge(QObject):
-    progress = Signal(int, str, float)
-    done = Signal(bool, str, list, object, float)
+class Signals(QObject):
+    loaded=Signal(object,object,object); failed=Signal(str); ai_progress=Signal(int,str,float); ai_done=Signal(bool,str,object,object,float,str)
+    def __init__(self): super().__init__()
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-        self.setMinimumSize(1280, 800)
-        self.setStyleSheet(DARK_THEME_QSS)
-
-        self.project = ProjectState()
-        self.audio_engine = AudioEngine()
-        self.wave_cache = WaveformCache()
-        self.pipeline = AnalysisPipeline()
-        
-        self.bridge = PipelineBridge()
-        self.bridge.progress.connect(self._on_pipeline_progress)
-        self.bridge.done.connect(self._on_pipeline_done)
-        
-        self.play_timer = QTimer(self)
-        self.play_timer.setInterval(30) # ~33fps
-        self.play_timer.timeout.connect(self._update_playhead)
-
-        self._init_ui()
-        self._init_menu()
-
-    def _init_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
-        
-        # --- Top Toolbar ---
-        toolbar = QHBoxLayout()
-        self.btn_load = QPushButton("Load Audio")
-        self.btn_load.clicked.connect(self._on_load_audio)
-        
-        self.btn_play = QPushButton("Play")
-        self.btn_play.clicked.connect(self._on_play)
-        
-        self.btn_stop = QPushButton("Stop")
-        self.btn_stop.clicked.connect(self._on_stop)
-
-        self.chk_skip_separation = QCheckBox("Input is already a drum stem")
-        self.chk_skip_separation.setChecked(True)
-        self.chk_skip_separation.setToolTip(
-            "Leave this enabled for drum stems. Disable it only for a full song, "
-            "which must be separated with Demucs first."
-        )
-        
-        self.btn_export = QPushButton("Export")
-        self.btn_export.setProperty("class", "AccentButton")
-        self.btn_export.clicked.connect(self._on_export)
-        
-        self.lbl_status = QLabel("Ready")
-        
-        toolbar.addWidget(self.btn_load)
-        toolbar.addWidget(self.btn_play)
-        toolbar.addWidget(self.btn_stop)
-        toolbar.addWidget(self.chk_skip_separation)
-        toolbar.addStretch()
-        toolbar.addWidget(self.lbl_status)
-        toolbar.addWidget(self.btn_export)
-        
-        main_layout.addLayout(toolbar)
-
-        # --- Main Splitter ---
-        self.splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(self.splitter)
-
-        # 1. Left Panel (Sample Browser)
-        self.browser = SampleBrowser("samples")
-        self.splitter.addWidget(self.browser)
-
-        # 2. Center Panel (Timeline + Lanes + Waveform)
-        center_widget = QWidget()
-        center_layout = QVBoxLayout(center_widget)
-        center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.setSpacing(0)
-        
-        # Timeline Ruler
-        self.timeline = TimelineRuler()
-        center_layout.addWidget(self.timeline)
-        
-        # Scroll area for lanes and waveform
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        
-        # The content of the scroll area
-        scroll_content = QWidget()
-        scroll_layout = QHBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.setSpacing(0)
-        
-        # Lane headers (Left side of scroll content)
-        lane_header_container = QWidget()
-        lane_header_layout = QVBoxLayout(lane_header_container)
-        lane_header_layout.setContentsMargins(0, 0, 0, 0)
-        lane_header_layout.setSpacing(0)
-        
-        self.lane_widgets = {}
-        for name in LANE_NAMES:
-            lw = LaneWidget(name, LANE_COLORS.get(name, "#ffffff"))
-            lane_header_layout.addWidget(lw)
-            self.lane_widgets[name] = lw
-            lw.mute_toggled.connect(self._on_lane_mute_changed)
-            lw.solo_toggled.connect(self._on_lane_solo_changed)
-            lw.volume_changed.connect(self._on_lane_volume_changed)
-        lane_header_layout.addStretch()
-        scroll_layout.addWidget(lane_header_container)
-        
-        # Waveform Editor (Right side of scroll content)
-        self.editor = WaveformEditor()
-        self.editor.setMinimumHeight(len(LANE_NAMES) * LANE_HEIGHT)
-        self.editor.setMinimumWidth(2000) # dynamic later
-        scroll_layout.addWidget(self.editor, 1)
-        
-        scroll_area.setWidget(scroll_content)
-        center_layout.addWidget(scroll_area)
-        
-        self.splitter.addWidget(center_widget)
-
-        # 3. Right Panel (Event Inspector)
-        self.inspector = EventInspector()
-        self.inspector.event_changed.connect(self._on_event_changed)
-        self.splitter.addWidget(self.inspector)
-
-        # Connect editor signals
-        self.editor.event_selected.connect(self._on_event_selected)
-        self.editor.event_moved.connect(self._on_event_moved)
-        self.editor.seek_requested.connect(self._on_seek_requested)
-        self.editor.sample_dropped.connect(self._on_sample_dropped)
-
-        # Set splitter sizes
-        self.splitter.setSizes([200, 800, 260])
-        
-        # Sync scrolling
-        self.scroll_bar = scroll_area.horizontalScrollBar()
-        self.scroll_bar.valueChanged.connect(self._on_scroll)
-
-    def _init_menu(self):
-        menubar = self.menuBar()
-        
-        file_menu = menubar.addMenu("File")
-        file_menu.addAction("Open Audio...", self._on_load_audio)
-        file_menu.addSeparator()
-        file_menu.addAction("Exit", self.close)
-        
-    def _on_load_audio(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Audio", "", "Audio Files (*.wav *.mp3 *.flac *.m4a *.ogg)"
-        )
-        if not path:
-            return
-            
-        self.lbl_status.setText(f"Loading {os.path.basename(path)}...")
-        self.btn_load.setEnabled(False)
-        # Start pipeline
-        self.pipeline.run_async(
-            audio_path=path,
-            sensitivity="medium",
-            use_gpu=True,
-            skip_separation=self.chk_skip_separation.isChecked(),
-            progress_cb=self.bridge.progress.emit,
-            done_cb=self.bridge.done.emit
-        )
-
-    def _on_pipeline_progress(self, stage_idx: int, stage_name: str, fraction: float):
-        # Must use QTimer or signal to update UI from thread, but PySide6 often handles simple QLabel setText ok.
-        # Safest way in production is via Signals. For this app, we'll just set it.
-        pct = int(fraction * 100)
-        self.lbl_status.setText(f"Stage {stage_idx+1}/6: {stage_name} ({pct}%)")
-
-    def _on_pipeline_done(self, success, error_msg, events, audio_info, bpm):
-        self.btn_load.setEnabled(True)
-        if not success:
-            QMessageBox.critical(self, "Error", f"Analysis failed:\n{error_msg}")
-            self.lbl_status.setText("Analysis failed.")
-            return
-
-        self.lbl_status.setText("Building waveform cache...")
-        
-        # Build project state
-        self.project = ProjectState()
-        self.project.source_path = audio_info.path
-        self.project.events = events
-        self.project.audio_info = audio_info
-        self.project.bpm = bpm
-        
-        for name in LANE_NAMES:
-            self.project.lane_states[name] = LaneState(name=name, color=LANE_COLORS.get(name, "#888888"))
-
-        # Load audio into engine
-        y, sr, _ = load_audio(audio_info.path, target_sr=44100, mono=True)
-        self.audio_engine.load(y, sr)
-        
-        # Build cache
-        self.wave_cache.build(y, sr, cache_key=os.path.basename(audio_info.path))
-        
-        # Update UI
-        self.editor.set_data(self.project.events, self.wave_cache, audio_info.duration)
-        self._on_scroll(self.scroll_bar.value())
-        
-        # Update width based on duration and zoom
-        width = int(audio_info.duration * self.editor.zoom)
-        self.editor.setMinimumWidth(max(width, self.editor.parentWidget().width()))
-        
-        self.lbl_status.setText("Ready.")
-
-    def _on_scroll(self, val):
-        self.editor.scroll_x = val
-        self.timeline.update_state(
-            self.project.audio_info.duration if self.project.audio_info else 0,
-            self.editor.zoom,
-            val,
-            self.project.bpm,
-            self.lane_widgets[LANE_NAMES[0]].width(),
-        )
-        self.editor.update()
-
-    def _on_event_selected(self, event_id: str):
-        if not event_id:
-            self.inspector.set_event(None)
-            return
-            
+        super().__init__(); self.setWindowTitle(f'{APP_NAME} v{APP_VERSION}'); self.setMinimumSize(1420,860); self.setStyleSheet(DARK_THEME_QSS)
+        self.project=new_project(); self.engine=AudioEngine(); self.cache=WaveformCache(); self.pipeline=AnalysisPipeline(); self.signals=Signals(); self.signals.loaded.connect(self._audio_ready); self.signals.failed.connect(self._load_failed); self.signals.ai_progress.connect(self._ai_progress); self.signals.ai_done.connect(self._ai_done)
+        self.play_timer=QTimer(self); self.play_timer.setInterval(30); self.play_timer.timeout.connect(self._tick)
+        self._build_ui(); self._build_menu()
+    def _build_ui(self):
+        root=QWidget(); self.setCentralWidget(root); outer=QVBoxLayout(root); outer.setContentsMargins(10,10,10,10); outer.setSpacing(8)
+        header=QFrame(); header.setObjectName('Header'); hl=QHBoxLayout(header); hl.setContentsMargins(14,10,14,10)
+        title=QLabel(APP_NAME); title.setObjectName('Title'); hl.addWidget(title); sub=QLabel('  /  '+APP_SUBTITLE); sub.setObjectName('Subtitle'); hl.addWidget(sub); hl.addStretch()
+        self.ai_label=QLabel('● AI: READY'); self.ai_label.setStyleSheet('color:#22c55e;font-weight:700;'); hl.addWidget(self.ai_label); outer.addWidget(header)
+        tools=QHBoxLayout();
+        self.btn_load=QPushButton('Load Audio'); self.btn_load.clicked.connect(self.load_audio_dialog); tools.addWidget(self.btn_load)
+        self.btn_save=QPushButton('Save Project'); self.btn_save.clicked.connect(self.save_project); tools.addWidget(self.btn_save)
+        self.btn_open=QPushButton('Open Project'); self.btn_open.clicked.connect(self.open_project); tools.addWidget(self.btn_open)
+        self.btn_play=QPushButton('▶ Play'); self.btn_play.clicked.connect(self.play); tools.addWidget(self.btn_play)
+        self.btn_stop=QPushButton('■ Stop'); self.btn_stop.clicked.connect(self.stop); tools.addWidget(self.btn_stop)
+        tools.addSpacing(12); tools.addWidget(QLabel('Input'))
+        self.stem=QCheckBox('Already a drum stem'); self.stem.setChecked(True); tools.addWidget(self.stem)
+        tools.addWidget(QLabel('Sensitivity')); self.sensitivity=QComboBox(); self.sensitivity.addItems(['low','medium','high']); self.sensitivity.setCurrentText('medium'); tools.addWidget(self.sensitivity)
+        self.btn_analyze=QPushButton('✦ Analyze AI'); self.btn_analyze.setObjectName('accent'); self.btn_analyze.clicked.connect(self.start_ai); tools.addWidget(self.btn_analyze)
+        tools.addStretch(); self.zoom_label=QLabel('Zoom 120 px/s'); tools.addWidget(self.zoom_label)
+        minus=QPushButton('−'); minus.setFixedWidth(32); minus.clicked.connect(lambda:self.set_zoom(self.editor.zoom/1.2)); tools.addWidget(minus)
+        plus=QPushButton('+'); plus.setFixedWidth(32); plus.clicked.connect(lambda:self.set_zoom(self.editor.zoom*1.2)); tools.addWidget(plus)
+        self.progress=QProgressBar(); self.progress.setFixedWidth(160); self.progress.setRange(0,100); self.progress.setValue(0); tools.addWidget(self.progress)
+        self.btn_export=QPushButton('Export WAV'); self.btn_export.setObjectName('accent'); self.btn_export.clicked.connect(self.export); tools.addWidget(self.btn_export)
+        outer.addLayout(tools)
+        self.status=QLabel('Load a drum stem to begin.'); self.status.setStyleSheet('color:#7f8b9b;padding-left:4px;'); outer.addWidget(self.status)
+        split=QSplitter(Qt.Horizontal); outer.addWidget(split,1)
+        self.browser=SampleBrowser('samples'); split.addWidget(self.browser)
+        center=QWidget(); cl=QVBoxLayout(center); cl.setContentsMargins(0,0,0,0); cl.setSpacing(6)
+        ovcard=QFrame(); ovcard.setObjectName('Card'); ovl=QVBoxLayout(ovcard); ovl.setContentsMargins(10,8,10,8); ovtop=QHBoxLayout(); ovtop.addWidget(QLabel('WAVEFORM OVERVIEW')); self.file_label=QLabel('No audio loaded'); self.file_label.setStyleSheet('color:#7f8b9b'); ovtop.addWidget(self.file_label); ovtop.addStretch(); ovl.addLayout(ovtop)
+        self.overview=OverviewWaveform(); self.overview.seek_requested.connect(self.seek); ovl.addWidget(self.overview); cl.addWidget(ovcard)
+        timeline_row=QHBoxLayout(); timeline_row.setSpacing(0)
+        self.lane_headers=QWidget(); self.lane_headers.setFixedWidth(LANE_HEADER_WIDTH); lh=QVBoxLayout(self.lane_headers); lh.setContentsMargins(0,34,0,0); lh.setSpacing(0)
+        self.lane_widgets={}
+        for n in LANE_NAMES:
+            w=LaneWidget(n,LANE_COLORS[n]); w.mute_toggled.connect(self.lane_mute); w.solo_toggled.connect(self.lane_solo); w.volume_changed.connect(self.lane_volume); lh.addWidget(w); self.lane_widgets[n]=w
+        timeline_row.addWidget(self.lane_headers)
+        self.scroll=QScrollArea(); self.scroll.setWidgetResizable(False); self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn); self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.scroll.setFrameShape(QFrame.NoFrame)
+        content=QWidget(); self.content=content; cv=QVBoxLayout(content); cv.setContentsMargins(0,0,0,0); cv.setSpacing(0)
+        self.ruler=TimelineRuler(); cv.addWidget(self.ruler)
+        self.editor=WaveformEditor(); self.editor.event_selected.connect(self.event_selected); self.editor.event_moved.connect(self.event_moved); self.editor.seek_requested.connect(self.seek); self.editor.sample_dropped.connect(self.sample_dropped); self.editor.zoom_changed.connect(self._zoom_changed); cv.addWidget(self.editor)
+        self.scroll.setWidget(content); self.scroll.horizontalScrollBar().valueChanged.connect(self._scroll_changed); timeline_row.addWidget(self.scroll,1); cl.addLayout(timeline_row,1)
+        split.addWidget(center)
+        self.inspector=EventInspector(); self.inspector.event_changed.connect(self.inspector_changed); split.addWidget(self.inspector); split.setSizes([200,1000,300])
+    def _build_menu(self):
+        m=self.menuBar().addMenu('File'); m.addAction('Open Audio...',self.load_audio_dialog); m.addAction('Open Project...',self.open_project); m.addAction('Save Project',self.save_project); m.addSeparator(); m.addAction('Exit',self.close)
+    def load_audio_dialog(self):
+        p,_=QFileDialog.getOpenFileName(self,'Open Drum Audio','','Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a *.aiff)')
+        if p:self.load_audio_path(p)
+    def load_audio_path(self,path):
+        self.btn_load.setEnabled(False); self.btn_analyze.setEnabled(False); self.progress.setValue(5); self.ai_label.setText('● AI: WAITING'); self.ai_label.setStyleSheet('color:#fbbf24;font-weight:700;'); self.status.setText('Loading audio and building waveform…'); self.file_label.setText(os.path.basename(path))
+        def work():
+            try:
+                y,sr,info=load_audio(path,target_sr=44100,mono=True); c=WaveformCache(); c.build(y,sr,cache_key=path); self.signals.loaded.emit(y,sr,(info,c))
+            except Exception as e:self.signals.failed.emit(str(e))
+        threading.Thread(target=work,daemon=True).start()
+    def _audio_ready(self,y,sr,pair):
+        info,c=pair; self.cache=c; self.engine.load(y,sr); self.project=new_project(); self.project.source_path=info.path; self.project.audio_info=info; self.project.bpm=120
+        self.editor.set_data([],c,info.duration); self.overview.set_data(c,info.duration); self._update_content_width(); self.btn_load.setEnabled(True); self.btn_analyze.setEnabled(True); self.progress.setValue(0); self.status.setText(f'{info.filename}  •  {info.duration:.2f}s  •  {sr} Hz  •  waveform ready'); self.ai_label.setText('● AI: READY'); self.ai_label.setStyleSheet('color:#22c55e;font-weight:700;'); self.start_ai()
+    def _load_failed(self,msg): self.btn_load.setEnabled(True); self.btn_analyze.setEnabled(True); self.ai_label.setText('● AI: ERROR'); self.ai_label.setStyleSheet('color:#ff4d6d;font-weight:700;'); QMessageBox.critical(self,'Audio load failed',msg)
+    def start_ai(self):
+        if not self.project.source_path:return
+        self.btn_analyze.setEnabled(False); self.progress.setValue(0); self.ai_label.setText('● AI: ANALYZING'); self.ai_label.setStyleSheet('color:#60a5fa;font-weight:700;'); self.status.setText('AI is detecting hits. Waveform remains editable while analysis runs…')
+        self.pipeline.run_async(self.project.source_path,self.sensitivity.currentText(),True,self.stem.isChecked(),self.signals.ai_progress.emit,self.signals.ai_done.emit)
+    def _ai_progress(self,i,name,f): self.progress.setValue(int(((i+f)/6)*100)); self.status.setText(f'AI {i+1}/6  •  {name}  •  {int(f*100)}%')
+    def _ai_done(self,ok,msg,events,info,bpm,mode):
+        self.btn_analyze.setEnabled(True)
+        if not ok:
+            self.ai_label.setText('● AI: FAILED'); self.ai_label.setStyleSheet('color:#ff4d6d;font-weight:700;'); self.status.setText('Waveform is ready, but AI analysis failed: '+msg); return
+        self.project.events=list(events); self.project.bpm=float(bpm); self.editor.set_data(self.project.events,self.cache,self.project.audio_info.duration,self.editor.zoom); self._update_content_width(); self.progress.setValue(100); self.ai_label.setText(f'● AI: {mode.upper()}'); self.ai_label.setStyleSheet('color:#22c55e;font-weight:700;'); self.status.setText(f'AI complete  •  {len(events)} events  •  {bpm:.1f} BPM')
+    def _update_content_width(self):
+        if not self.project.audio_info:return
+        w=max(900,int(self.project.audio_info.duration*self.editor.zoom)+20); self.editor.setMinimumWidth(w); self.ruler.setMinimumWidth(w); self.content.setMinimumWidth(w); self.content.resize(max(w,self.scroll.viewport().width()),self.content.sizeHint().height()); self.ruler.set_state(self.project.audio_info.duration,self.editor.zoom,self.scroll.horizontalScrollBar().value(),self.project.bpm)
+    def set_zoom(self,z): self.editor.set_zoom(z)
+    def _zoom_changed(self,z): self.project.zoom=z; self.zoom_label.setText(f'Zoom {z:.0f} px/s'); self._update_content_width(); self.ruler.set_state(self.project.audio_info.duration if self.project.audio_info else 0,z,self.scroll.horizontalScrollBar().value(),self.project.bpm)
+    def _scroll_changed(self,v): self.ruler.set_state(self.project.audio_info.duration if self.project.audio_info else 0,self.editor.zoom,v,self.project.bpm); self.editor.update()
+    def event_selected(self,eid):
+        ev=next((x for x in self.project.events if x.id==eid),None); self.inspector.set_event(ev)
+    def event_moved(self,eid,start): self.status.setText(f'Event moved to {start:.3f}s')
+    def inspector_changed(self,eid): self.editor.update()
+    def sample_dropped(self,lane,path):
         for e in self.project.events:
-            if e.id == event_id:
-                self.inspector.set_event(e)
-                break
-
-    def _on_event_changed(self, event_id: str):
-        self.editor.update()
-
-    def _on_event_moved(self, event_id: str, start: float):
-        if self.inspector.current_event and self.inspector.current_event.id == event_id:
-            self.inspector.set_event(self.inspector.current_event)
-        self.editor.update()
-
-    def _on_seek_requested(self, position: float):
-        self.audio_engine.seek(position)
-        self.editor.set_playhead(position)
-
-    def _on_lane_mute_changed(self, lane: str, muted: bool):
-        state = self.project.lane_states.get(lane)
-        if state:
-            state.muted = muted
-
-    def _on_lane_solo_changed(self, lane: str, soloed: bool):
-        state = self.project.lane_states.get(lane)
-        if state:
-            state.soloed = soloed
-
-    def _on_lane_volume_changed(self, lane: str, volume: float):
-        state = self.project.lane_states.get(lane)
-        if state:
-            state.volume = volume
-
-    def _on_sample_dropped(self, lane: str, path: str):
-        """Assign a dragged sample to every event in the target lane."""
-        state = self.project.lane_states.get(lane)
-        if state:
-            state.replacement_sample = path
-        affected = 0
-        for event in self.project.events:
-            if event.type == lane:
-                event.replacement_sample = path
-                affected += 1
-        self.lbl_status.setText(
-            f"Assigned {os.path.basename(path)} to {lane} ({affected} events)"
-        )
-        
-    def _on_play(self):
-        if self.audio_engine.original is not None:
-            self.audio_engine.play(start=self.editor.playhead_pos)
-            self.play_timer.start()
-            
-    def _on_stop(self):
-        self.audio_engine.stop()
-        self.play_timer.stop()
-        
-    def _update_playhead(self):
-        if self.audio_engine.is_playing:
-            self.editor.set_playhead(self.audio_engine.position)
-        else:
-            self.play_timer.stop()
-
-    def _on_export(self):
-        if self.audio_engine.original is None:
-            QMessageBox.information(self, "Export", "Load audio before exporting.")
-            return
-
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Mix", "neurodrums_mix.wav", "WAV Audio (*.wav)"
-        )
-        if not path:
-            return
-        if not path.lower().endswith(".wav"):
-            path += ".wav"
-
+            if e.type==lane:e.replacement_sample=path
+        self.status.setText(f'Replacement sample assigned to {lane}: {os.path.basename(path)}'); self.editor.update()
+    def lane_mute(self,lane,v): self.project.lane_states[lane].muted=v; [setattr(e,'muted',v) for e in self.project.events if e.type==lane]; self.editor.update()
+    def lane_solo(self,lane,v): self.project.lane_states[lane].soloed=v
+    def lane_volume(self,lane,v): self.project.lane_states[lane].volume=v
+    def seek(self,t): self.engine.seek(t); self.editor.set_playhead(t); self.overview.set_playhead(t)
+    def play(self):
+        if self.engine.original is None:return
+        try:self.engine.play(self.editor.playhead); self.play_timer.start(); self.btn_play.setText('❚❚ Playing')
+        except Exception as e: QMessageBox.warning(self,'Playback unavailable',str(e))
+    def stop(self): self.engine.stop(); self.play_timer.stop(); self.btn_play.setText('▶ Play')
+    def _tick(self):
+        if self.engine.is_playing:self.editor.set_playhead(self.engine.position); self.overview.set_playhead(self.engine.position)
+        else:self.stop()
+    def save_project(self):
+        if not self.project.source_path:return
+        p,_=QFileDialog.getSaveFileName(self,'Save NeuroDrums Project','','NeuroDrums Project (*.ndp)');
+        if p:
+            if not p.lower().endswith('.ndp'):p+='.ndp'
+            try:save_project(self.project,p); self.status.setText('Project saved: '+os.path.basename(p))
+            except Exception as e:QMessageBox.critical(self,'Save failed',str(e))
+    def open_project(self):
+        p,_=QFileDialog.getOpenFileName(self,'Open NeuroDrums Project','','NeuroDrums Project (*.ndp)');
+        if not p:return
         try:
-            renderer = AudioRenderer(self.audio_engine.sr)
-            mix, _ = renderer.render(
-                self.audio_engine.original, self.project.events, self.project.lane_states
-            )
-            export_mix(mix, self.audio_engine.sr, path)
-            self.audio_engine.set_processed(mix)
-            self.lbl_status.setText(f"Exported {os.path.basename(path)}")
-        except Exception as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
-
-    def closeEvent(self, event):
-        self.pipeline.cancel()
-        self.audio_engine.stop()
-        event.accept()
+            pr=load_project(p); self.project=pr
+            if pr.source_path and os.path.isfile(pr.source_path): self.load_audio_path(pr.source_path); self.status.setText('Project loaded; re-analyzing source…')
+            else: QMessageBox.warning(self,'Audio missing','The project loaded, but its source audio path is not available on this computer.')
+        except Exception as e:QMessageBox.critical(self,'Open failed',str(e))
+    def export(self):
+        if self.engine.original is None:return
+        p,_=QFileDialog.getSaveFileName(self,'Export WAV','neurodrums_mix.wav','WAV (*.wav)');
+        if not p:return
+        try:
+            mix,_=AudioRenderer(self.engine.sr).render(self.engine.original,self.project.events,self.project.lane_states); export_mix(mix,self.engine.sr,p,24); self.engine.set_processed(mix); self.status.setText('Exported '+os.path.basename(p))
+        except Exception as e:QMessageBox.critical(self,'Export failed',str(e))
+    def closeEvent(self,e): self.pipeline.cancel(); self.engine.stop(); e.accept()
